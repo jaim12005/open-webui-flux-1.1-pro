@@ -1,14 +1,16 @@
 """
-title: FLUX.1 Schnell Manifold Function for Black Forest Lab Image Generation Models
-authors: bgeneto
+title: FLUX.1.1 Pro Manifold Function for Black Forest Lab Image Generation Models
+author: mobilestack, bgeneto
+author_url: https://github.com/mobilestack/open-webui-flux-1.1-pro
+            forked from https://github.com/bgeneto/open-webui-flux-image-gen
 funding_url: https://github.com/open-webui
-version: 0.1.4
+version: 0.2
 license: MIT
 requirements: pydantic, requests
-environment_variables: FLUX_SCHNELL_API_BASE_URL, FLUX_SCHNELL_API_KEY
+environment_variables: FLUX_PRO_API_BASE_URL, FLUX_PRO_API_KEY
 supported providers: huggingface.co, replicate.com, together.xyz
-https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell
-https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions
+https://api-inference.huggingface.co/models/black-forest-labs/
+https://api.replicate.com/v1/models/black-forest-labs/
 https://api.together.xyz/v1/images/generations
 """
 
@@ -23,7 +25,7 @@ from pydantic import BaseModel, Field
 
 class Pipe:
     """
-    Class representing the FLUX.1 Schnell Manifold Function.
+    Class representing the FLUX.1.1-pro Manifold Function.
     """
 
     class Valves(BaseModel):
@@ -31,11 +33,11 @@ class Pipe:
         Pydantic model for storing API keys and base URLs.
         """
 
-        FLUX_SCHNELL_API_KEY: str = Field(
-            default="", description="Your API Key for Flux.1 Schnell"
+        FLUX_PRO_API_KEY: str = Field(
+            default="", description="Your API Key for Flux.1.1 Pro"
         )
-        FLUX_SCHNELL_API_BASE_URL: str = Field(
-            default="https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions",
+        FLUX_PRO_API_BASE_URL: str = Field(
+            default="https://api.together.xyz/v1/images/generations",
             description="Base URL for the API",
         )
 
@@ -44,13 +46,13 @@ class Pipe:
         Initialize the Pipe class with default values and environment variables.
         """
         self.type = "manifold"
-        self.id = "FLUX.1[schnell]"
-        self.name = "FLUX.1: "
+        self.id = "FLUX_1_1_PRO"
+        self.name = "FLUX.1.1-pro: "
         self.valves = self.Valves(
-            FLUX_SCHNELL_API_KEY=os.getenv("FLUX_SCHNELL_API_KEY", ""),
-            FLUX_SCHNELL_API_BASE_URL=os.getenv(
-                "FLUX_SCHNELL_API_BASE_URL",
-                "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell",
+            FLUX_PRO_API_KEY=os.getenv("FLUX_PRO_API_KEY", ""),
+            FLUX_PRO_API_BASE_URL=os.getenv(
+                "FLUX_PRO_API_BASE_URL",
+                "https://api.together.xyz/v1/images/generations",
             ),
         )
 
@@ -64,7 +66,7 @@ class Pipe:
         Returns:
             str: Base64-encoded image data.
         """
-        headers = {"Authorization": f"Bearer {self.valves.FLUX_SCHNELL_API_KEY}"}
+        headers = {"Authorization": f"Bearer {self.valves.FLUX_PRO_API_KEY}"}
         response = requests.get(url, headers=headers)
         response.raise_for_status()
 
@@ -163,7 +165,7 @@ class Pipe:
         """
         try:
             response = requests.post(
-                url=self.valves.FLUX_SCHNELL_API_BASE_URL,
+                url=self.valves.FLUX_PRO_API_BASE_URL,
                 headers=headers,
                 json=payload,
                 stream=False,
@@ -191,7 +193,7 @@ class Pipe:
         Returns:
             List[Dict[str, str]]: The list of pipes.
         """
-        return [{"id": "flux_schnell", "name": "Schnell"}]
+        return [{"id": "flux_1_1_pro", "name": "Flux 1.1 PRO"}]
 
     def pipe(
         self, body: Dict[str, Any]
@@ -206,7 +208,7 @@ class Pipe:
             Union[str, Generator[str, None, None], Iterator[str]]: The response from the API.
         """
         headers = {
-            "Authorization": f"Bearer {self.valves.FLUX_SCHNELL_API_KEY}",
+            "Authorization": f"Bearer {self.valves.FLUX_PRO_API_KEY}",
             "Content-Type": "application/json",
         }
 
@@ -232,7 +234,7 @@ class Pipe:
                 }
             },
             "together.xyz": {
-                "model": "black-forest-labs/FLUX.1-schnell",
+                "model": "black-forest-labs/FLUX.1.1-pro",
                 "prompt": prompt,
                 "width": 1024,
                 "height": 1024,
@@ -244,7 +246,7 @@ class Pipe:
 
         payload = None
         for key in payload_map:
-            if key in self.valves.FLUX_SCHNELL_API_BASE_URL:
+            if key in self.valves.FLUX_PRO_API_BASE_URL:
                 payload = payload_map[key]
                 headers.update(headers_map.get(key, {}))
                 break
