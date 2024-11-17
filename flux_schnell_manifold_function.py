@@ -12,24 +12,95 @@ supported providers: replicate.com
 
 import base64
 import os
-from typing import Any, Dict, Generator, Iterator, List, Union, Optional
+from typing import Any, Dict, Generator, Iterator, List, Union, Optional, Literal
 import requests
 from open_webui.utils.misc import get_last_user_message
 from pydantic import BaseModel, Field, validator
-from typing import Literal
 
-AspectRatioType = Literal["21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16", "9:21"]
+AspectRatioType = Literal[
+    "21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16", "9:21"
+]
 OutputFormatType = Literal["jpg", "png"]
+SafetyToleranceType = Literal[1, 2, 3, 4, 5, 6]
 
 
 class Pipe:
     """
     Class representing the FLUX.1.1-pro-ultra Manifold Function.
+
+    Available Aspect Ratios:
+        - Wide formats: "21:9", "16:9"
+        - Standard formats: "3:2", "4:3", "5:4", "1:1"
+        - Portrait formats: "4:5", "3:4", "2:3", "9:16", "9:21"
+
+    Available Output Formats:
+        - "jpg": Standard JPEG format
+        - "png": Lossless PNG format
+
+    Safety Tolerance Levels:
+        1: Maximum safety (strictest content filtering)
+        2: Very high safety (default)
+        3: High safety
+        4: Medium safety
+        5: Low safety
+        6: Minimum safety (most permissive)
     """
+
+    # Available options for configuration
+    AVAILABLE_ASPECT_RATIOS = [
+        "21:9",  # Ultra-wide
+        "16:9",  # Wide screen
+        "3:2",  # Standard photo
+        "4:3",  # Standard monitor
+        "5:4",  # Square-ish
+        "1:1",  # Perfect square
+        "4:5",  # Portrait
+        "3:4",  # Portrait
+        "2:3",  # Portrait
+        "9:16",  # Mobile portrait
+        "9:21",  # Ultra portrait
+    ]
+
+    AVAILABLE_OUTPUT_FORMATS = [
+        "jpg",  # Standard format, smaller file size
+        "png",  # Lossless format, larger file size
+    ]
+
+    AVAILABLE_SAFETY_LEVELS = [
+        1,  # Maximum safety (strictest filtering)
+        2,  # Very high safety (default)
+        3,  # High safety
+        4,  # Medium safety
+        5,  # Low safety
+        6,  # Minimum safety (most permissive)
+    ]
+
+    SAFETY_TOLERANCE_LEVELS = {
+        1: "Maximum safety (strictest filtering)",
+        2: "Very high safety (default)",
+        3: "High safety",
+        4: "Medium safety",
+        5: "Low safety",
+        6: "Minimum safety (most permissive)",
+    }
 
     class Valves(BaseModel):
         """
         Pydantic model for storing API keys and base URLs.
+
+        Environment Variables:
+            REPLICATE_API_TOKEN: Your API Token for Replicate
+            FLUX_RAW_MODE: Set to "true" for less processed images
+            FLUX_SAFETY_TOLERANCE: Integer 1-6 where:
+                1: Maximum safety (strictest filtering)
+                2: Very high safety (default)
+                3: High safety
+                4: Medium safety
+                5: Low safety
+                6: Minimum safety (most permissive)
+            FLUX_SEED: Integer for reproducible generation (optional)
+            FLUX_ASPECT_RATIO: One of the available aspect ratios
+            FLUX_OUTPUT_FORMAT: Either "jpg" or "png"
         """
 
         REPLICATE_API_TOKEN: str = Field(
@@ -43,24 +114,18 @@ class Pipe:
             default=False,
             description="Generate less processed, more natural-looking images",
         )
-        FLUX_SAFETY_TOLERANCE: int = Field(
-            default=1,
-            description="Safety tolerance (1-6, where 1 is strictest)",
-            ge=1,
-            le=6,
+        FLUX_SAFETY_TOLERANCE: SafetyToleranceType = Field(
+            default=1, description="Safety tolerance levels for content filtering"
         )
         FLUX_SEED: Optional[int] = Field(
             default=None,
             description="Random seed for image generation. None/blank for random",
         )
         FLUX_ASPECT_RATIO: AspectRatioType = Field(
-            default="1:1",
-            description="Aspect ratio for the generated image"
+            default="1:1", description="Aspect ratio for the generated image"
         )
-        FLUX_OUTPUT_FORMAT: str = Field(
-            default="jpg",
-            description="Output format for the generated image",
-            pattern="^(jpg|png)$",
+        FLUX_OUTPUT_FORMAT: OutputFormatType = Field(
+            default="jpg", description="Output format for the generated image"
         )
 
         @validator("FLUX_SAFETY_TOLERANCE")
@@ -88,8 +153,6 @@ class Pipe:
             FLUX_ASPECT_RATIO=os.getenv("FLUX_ASPECT_RATIO", "1:1"),
             FLUX_OUTPUT_FORMAT=os.getenv("FLUX_OUTPUT_FORMAT", "jpg"),
         )
-        if not self.valves.REPLICATE_API_TOKEN:
-            raise ValueError("REPLICATE_API_TOKEN environment variable is required")
 
     def get_img_extension(self, img_data: str) -> Union[str, None]:
         """
@@ -213,8 +276,10 @@ class Pipe:
         """
         return [{"id": "flux_1_1_pro_ultra", "name": "Flux 1.1 Pro Ultra"}]
 
+
 # Add environment variable validation helper
 def validate_env_int(value: str, default: int, min_val: int, max_val: int) -> int:
+    """Helper function to validate integer environment variables."""
     try:
         val = int(value)
         return max(min_val, min(val, max_val))
