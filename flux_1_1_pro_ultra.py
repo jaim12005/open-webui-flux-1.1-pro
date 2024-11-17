@@ -139,7 +139,7 @@ class Pipe:
         Initialize the Pipe class with default values and environment variables.
         """
         self.type = "manifold"
-        self.id = "FLUX_1_1__PRO_ULTRA"
+        self.id = "FLUX_1_1_PRO_ULTRA"
         self.name = "FLUX.1.1-pro-ultra: "
         self.valves = self.Valves(
             REPLICATE_API_TOKEN=os.getenv("REPLICATE_API_TOKEN", ""),
