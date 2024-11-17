@@ -15,7 +15,11 @@ import os
 from typing import Any, Dict, Generator, Iterator, List, Union, Optional
 import requests
 from open_webui.utils.misc import get_last_user_message
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
+from typing import Literal
+
+AspectRatioType = Literal["21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16", "9:21"]
+OutputFormatType = Literal["jpg", "png"]
 
 
 class Pipe:
@@ -49,16 +53,21 @@ class Pipe:
             default=None,
             description="Random seed for image generation. None/blank for random",
         )
-        FLUX_ASPECT_RATIO: str = Field(
+        FLUX_ASPECT_RATIO: AspectRatioType = Field(
             default="1:1",
-            description="Aspect ratio for the generated image",
-            pattern="^(21:9|16:9|3:2|4:3|5:4|1:1|4:5|3:4|2:3|9:16|9:21)$",
+            description="Aspect ratio for the generated image"
         )
         FLUX_OUTPUT_FORMAT: str = Field(
             default="jpg",
             description="Output format for the generated image",
             pattern="^(jpg|png)$",
         )
+
+        @validator("FLUX_SAFETY_TOLERANCE")
+        def validate_safety_tolerance(cls, v):
+            if not 1 <= v <= 6:
+                raise ValueError("Safety tolerance must be between 1 and 6")
+            return v
 
     def __init__(self):
         """
@@ -79,6 +88,8 @@ class Pipe:
             FLUX_ASPECT_RATIO=os.getenv("FLUX_ASPECT_RATIO", "1:1"),
             FLUX_OUTPUT_FORMAT=os.getenv("FLUX_OUTPUT_FORMAT", "jpg"),
         )
+        if not self.valves.REPLICATE_API_TOKEN:
+            raise ValueError("REPLICATE_API_TOKEN environment variable is required")
 
     def get_img_extension(self, img_data: str) -> Union[str, None]:
         """
@@ -201,3 +212,11 @@ class Pipe:
         Get the list of available pipes.
         """
         return [{"id": "flux_1_1_pro_ultra", "name": "Flux 1.1 Pro Ultra"}]
+
+# Add environment variable validation helper
+def validate_env_int(value: str, default: int, min_val: int, max_val: int) -> int:
+    try:
+        val = int(value)
+        return max(min_val, min(val, max_val))
+    except (TypeError, ValueError):
+        return default
