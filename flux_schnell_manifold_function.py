@@ -1,7 +1,7 @@
 """
 title: FLUX.1.1 Pro Ultra Manifold Function for Black Forest Lab Image Generation Models
-author: mobilestack, credit to bgeneto
-author_url: https://github.com/mobilestack/open-webui-flux-1.1-pro
+author: Balaxxe, credit to mobilestack and bgeneto
+author_url: https://github.com/jaim12005/open-webui-flux-1.1-pro-ultra
 funding_url: https://github.com/open-webui
 version: 1.3
 license: MIT
