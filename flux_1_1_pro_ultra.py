@@ -3,7 +3,7 @@ title: FLUX.1.1 Pro Ultra Manifold Function for Black Forest Lab Image Generatio
 author: Balaxxe, credit to mobilestack and bgeneto
 author_url: https://github.com/jaim12005/open-webui-flux-1.1-pro-ultra
 funding_url: https://github.com/open-webui
-version: 1.7
+version: 1.8
 license: MIT
 requirements: pydantic, requests
 environment_variables: REPLICATE_API_TOKEN
@@ -13,11 +13,19 @@ supported providers: replicate.com
 import base64
 import os
 import time
-from typing import Any, Dict, Generator, Iterator, List, Union, Optional, Literal, cast
+import logging
+from typing import Any, Dict, Generator, Iterator, List, Union, Optional, Literal, cast, Tuple
 import requests
-from requests.exceptions import RequestException, Timeout
+from requests.exceptions import RequestException, Timeout, ConnectionError
 from open_webui.utils.misc import get_last_user_message
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator, ValidationError
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Type definitions with more specific types
 AspectRatioType = Literal["21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16", "9:21"]
@@ -39,6 +47,8 @@ class Pipe:
         - Multiple output format options
         - Seed control for reproducible generations
         - Raw mode for less processed images
+        - Comprehensive error handling and logging
+        - Input validation for all parameters
 
     Available Aspect Ratios:
         - Wide formats: "21:9", "16:9"
@@ -56,6 +66,12 @@ class Pipe:
         4: Medium safety
         5: Low safety
         6: Minimum safety (most permissive)
+
+    Raises:
+        ValidationError: If configuration parameters are invalid
+        RequestException: If API requests fail
+        TimeoutError: If API requests timeout
+        ValueError: If input parameters are invalid
     """
 
     # API endpoints
@@ -164,6 +180,19 @@ class Pipe:
                 raise ValueError("Seed must be a positive integer")
             return v
 
+    class ImageGenerationParams(BaseModel):
+        """Pydantic model for image generation parameters validation."""
+        prompt: str = Field(..., min_length=1, max_length=500)
+        negative_prompt: Optional[str] = Field(default=None, max_length=500)
+        num_inference_steps: int = Field(default=30, ge=1, le=100)
+        guidance_scale: float = Field(default=7.5, ge=1.0, le=20.0)
+        
+        @validator('prompt')
+        def validate_prompt(cls, v):
+            if not v.strip():
+                raise ValueError("Prompt cannot be empty or just whitespace")
+            return v.strip()
+
     def __init__(self):
         """
         Initialize the Pipe class with default values and environment variables.
@@ -192,17 +221,135 @@ class Pipe:
             img_data: Base64 encoded image data
 
         Returns:
-            str or None: Image extension if recognized, None otherwise
+            Optional[str]: Image extension if recognized ('jpeg' or 'png'), None otherwise
+
+        Raises:
+            ValueError: If the image data is invalid or corrupted
         """
-        if img_data.startswith("/9j/"):
-            return "jpeg"
-        elif img_data.startswith("iVBOR"):
-            return "png"
-        elif img_data.startswith("R0lG"):
-            return "gif"
-        elif img_data.startswith("UklGR"):
-            return "webp"
-        return None
+        try:
+            if not img_data:
+                raise ValueError("Empty image data provided")
+                
+            if img_data.startswith("/9j/"):
+                return "jpeg"
+            elif img_data.startswith("iVBOR"):
+                return "png"
+            return None
+        except Exception as e:
+            logger.error(f"Error determining image extension: {str(e)}")
+            raise ValueError(f"Invalid image data: {str(e)}")
+
+    def make_api_request(self, method: str, url: str, **kwargs) -> Dict[str, Any]:
+        """
+        Make an API request with retry logic and error handling.
+
+        Args:
+            method: HTTP method to use
+            url: API endpoint URL
+            **kwargs: Additional arguments to pass to requests
+
+        Returns:
+            Dict[str, Any]: API response data
+
+        Raises:
+            RequestException: If the API request fails after all retries
+        """
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                response = requests.request(
+                    method,
+                    url,
+                    timeout=(self.TIMEOUT_CONNECT, self.TIMEOUT_READ),
+                    **kwargs
+                )
+                response.raise_for_status()
+                return response.json()
+            except Timeout:
+                logger.warning(f"Request timeout (attempt {attempt + 1}/{self.MAX_RETRIES})")
+                if attempt == self.MAX_RETRIES - 1:
+                    raise
+            except ConnectionError as e:
+                logger.error(f"Connection error: {str(e)}")
+                if attempt == self.MAX_RETRIES - 1:
+                    raise
+            except RequestException as e:
+                logger.error(f"API request failed: {str(e)}")
+                if attempt == self.MAX_RETRIES - 1:
+                    raise
+            
+            time.sleep(self.RETRY_DELAY)
+
+    def validate_image_params(self, prompt: str, **kwargs) -> Dict[str, Any]:
+        """
+        Validate image generation parameters.
+
+        Args:
+            prompt: The main prompt for image generation
+            **kwargs: Additional parameters for image generation
+
+        Returns:
+            Dict[str, Any]: Validated parameters
+
+        Raises:
+            ValidationError: If parameters are invalid
+        """
+        params = self.ImageGenerationParams(
+            prompt=prompt,
+            **kwargs
+        )
+        return params.dict(exclude_none=True)
+
+    def generate_image(self, prompt: str, **kwargs) -> Tuple[str, str]:
+        """
+        Generate an image based on the provided prompt and parameters.
+
+        Args:
+            prompt: The main prompt for image generation
+            **kwargs: Additional parameters for image generation
+
+        Returns:
+            Tuple[str, str]: A tuple containing (image_data, image_format)
+
+        Raises:
+            ValueError: If parameters are invalid
+            RequestException: If API request fails
+            TimeoutError: If request times out
+        """
+        try:
+            logger.info(f"Starting image generation with prompt: {prompt}")
+            
+            # Validate parameters
+            params = self.validate_image_params(prompt, **kwargs)
+            
+            # Make API request
+            response = self.make_api_request(
+                "POST",
+                self.PREDICTIONS_URL,
+                json=params,
+                headers={"Authorization": f"Token {self.valves.REPLICATE_API_TOKEN}"}
+            )
+            
+            # Process response
+            image_data = response.get("output")
+            if not image_data:
+                raise ValueError("No image data in API response")
+                
+            image_format = self.get_img_extension(image_data)
+            if not image_format:
+                raise ValueError("Unrecognized image format")
+            
+            logger.info("Image generation completed successfully")
+            return image_data, image_format
+            
+        except ValidationError as e:
+            logger.error(f"Parameter validation failed: {str(e)}")
+            raise ValueError(f"Invalid parameters: {str(e)}")
+        except (RequestException, TimeoutError) as e:
+            logger.error(f"API request failed: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error during image generation: {str(e)}")
+            raise
 
     def handle_image_response(self, response: requests.Response) -> str:
         """
