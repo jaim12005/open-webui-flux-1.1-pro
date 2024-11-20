@@ -1,531 +1,107 @@
 """
 title: FLUX.1.1 Pro Ultra Manifold Function for Black Forest Lab Image Generation Models
-author: Balaxxe, credit to mobilestack and bgeneto
-author_url: https://github.com/jaim12005/open-webui-flux-1.1-pro-ultra
-funding_url: https://github.com/open-webui
-version: 1.8
+version: 1.9
 license: MIT
 requirements: pydantic, requests
 environment_variables: REPLICATE_API_TOKEN
-supported providers: replicate.com
 """
 
 import base64
 import os
-import time
-import logging
-from typing import Any, Dict, Generator, Iterator, List, Union, Optional, Literal, cast, Tuple
+from typing import Dict, Generator, Iterator, Union, Optional, Literal, cast
 import requests
-from requests.exceptions import RequestException, Timeout, ConnectionError
+from requests.adapters import HTTPAdapter
 from open_webui.utils.misc import get_last_user_message
-from pydantic import BaseModel, Field, validator, ValidationError
+from pydantic import BaseModel, Field
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-# Type definitions with more specific types
 AspectRatioType = Literal["21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16", "9:21"]
 OutputFormatType = Literal["jpg", "png"]
 SafetyToleranceType = Literal[1, 2, 3, 4, 5, 6]
-PredictionStatusType = Literal["succeeded", "failed", "canceled", "processing"]
-
 
 class Pipe:
-    """
-    Class representing the FLUX.1.1-pro-ultra Manifold Function.
-
-    This class provides an interface to the Black Forest Labs image generation model,
-    allowing for customizable image generation with various parameters and safety controls.
-
-    Features:
-        - Multiple aspect ratio support
-        - Configurable safety tolerance levels
-        - Multiple output format options
-        - Seed control for reproducible generations
-        - Raw mode for less processed images
-        - Comprehensive error handling and logging
-        - Input validation for all parameters
-
-    Available Aspect Ratios:
-        - Wide formats: "21:9", "16:9"
-        - Standard formats: "3:2", "4:3", "5:4", "1:1"
-        - Portrait formats: "4:5", "3:4", "2:3", "9:16", "9:21"
-
-    Available Output Formats:
-        - "jpg": Standard JPEG format (smaller file size)
-        - "png": Lossless PNG format (larger file size, better quality)
-
-    Safety Tolerance Levels:
-        1: Maximum safety (strictest content filtering)
-        2: Very high safety (default)
-        3: High safety
-        4: Medium safety
-        5: Low safety
-        6: Minimum safety (most permissive)
-
-    Raises:
-        ValidationError: If configuration parameters are invalid
-        RequestException: If API requests fail
-        TimeoutError: If API requests timeout
-        ValueError: If input parameters are invalid
-    """
-
-    # API endpoints
     BASE_URL = "https://api.replicate.com/v1"
-    PREDICTIONS_URL = f"{BASE_URL}/models/black-forest-labs/flux-1.1-pro-ultra/predictions"
-
-    # Request settings
-    TIMEOUT_CONNECT = 3.05  # seconds
-    TIMEOUT_READ = 60  # seconds
-    MAX_RETRIES = 3
-    RETRY_DELAY = 1  # seconds
-    POLL_INTERVAL = 1  # seconds
-    MAX_POLL_TIME = 300  # seconds
-
-    # Available options for configuration
-    AVAILABLE_ASPECT_RATIOS: List[AspectRatioType] = [
-        "21:9",  # Ultra-wide
-        "16:9",  # Wide screen
-        "3:2",   # Standard photo
-        "4:3",   # Standard monitor
-        "5:4",   # Square-ish
-        "1:1",   # Perfect square
-        "4:5",   # Portrait
-        "3:4",   # Portrait
-        "2:3",   # Portrait
-        "9:16",  # Mobile portrait
-        "9:21"   # Ultra portrait
-    ]
-
-    AVAILABLE_OUTPUT_FORMATS: List[OutputFormatType] = [
-        "jpg",  # Standard format, smaller file size
-        "png"   # Lossless format, larger file size
-    ]
-
-    AVAILABLE_SAFETY_LEVELS: List[SafetyToleranceType] = [
-        1,  # Maximum safety (strictest filtering)
-        2,  # Very high safety (default)
-        3,  # High safety
-        4,  # Medium safety
-        5,  # Low safety
-        6   # Minimum safety (most permissive)
-    ]
-
-    SAFETY_TOLERANCE_LEVELS: Dict[SafetyToleranceType, str] = {
-        1: "Maximum safety (strictest filtering)",
-        2: "Very high safety (default)",
-        3: "High safety",
-        4: "Medium safety",
-        5: "Low safety",
-        6: "Minimum safety (most permissive)"
-    }
+    MODEL_URL = f"{BASE_URL}/models/black-forest-labs/flux-1.1-pro-ultra/predictions"
+    session = requests.Session()
+    session.mount("https://", HTTPAdapter(max_retries=3))
 
     class Valves(BaseModel):
-        """
-        Pydantic model for storing API keys and configuration settings.
+        REPLICATE_API_TOKEN: str = Field(default="")
+        FLUX_RAW_MODE: bool = Field(default=False)
+        FLUX_SAFETY_TOLERANCE: SafetyToleranceType = Field(default=2)
+        FLUX_SEED: Optional[int] = Field(default=None)
+        FLUX_ASPECT_RATIO: AspectRatioType = Field(default="1:1")
+        FLUX_OUTPUT_FORMAT: OutputFormatType = Field(default="jpg")
 
-        Environment Variables:
-            REPLICATE_API_TOKEN: Your API Token for Replicate
-            FLUX_RAW_MODE: Set to "true" for less processed images
-            FLUX_SAFETY_TOLERANCE: Integer 1-6 for content filtering levels
-            FLUX_SEED: Integer for reproducible generation (optional)
-            FLUX_ASPECT_RATIO: One of the available aspect ratios
-            FLUX_OUTPUT_FORMAT: Either "jpg" or "png"
-        """
-
-        REPLICATE_API_TOKEN: str = Field(
-            default="",
-            description="Your API Token for Replicate"
-        )
-        REPLICATE_API_BASE_URL: str = Field(
-            default="https://api.replicate.com/v1",
-            description="Base URL for the Replicate API",
-        )
-        FLUX_RAW_MODE: bool = Field(
-            default=False,
-            description="Generate less processed, more natural-looking images",
-        )
-        FLUX_SAFETY_TOLERANCE: SafetyToleranceType = Field(
-            default=1,
-            description="Safety tolerance levels for content filtering"
-        )
-        FLUX_SEED: Optional[int] = Field(
-            default=None,
-            description="Random seed for image generation. None/blank for random",
-        )
-        FLUX_ASPECT_RATIO: AspectRatioType = Field(
-            default="1:1",
-            description="Aspect ratio for the generated image"
-        )
-        FLUX_OUTPUT_FORMAT: OutputFormatType = Field(
-            default="jpg",
-            description="Output format for the generated image"
-        )
-
-        @validator("FLUX_SAFETY_TOLERANCE")
-        def validate_safety_tolerance(cls, v: SafetyToleranceType) -> SafetyToleranceType:
-            """Validate safety tolerance is within acceptable range."""
-            if not 1 <= v <= 6:
-                raise ValueError("Safety tolerance must be between 1 and 6")
-            return v
-
-        @validator("FLUX_SEED")
-        def validate_seed(cls, v: Optional[int]) -> Optional[int]:
-            """Validate seed is a positive integer if provided."""
-            if v is not None and v < 0:
-                raise ValueError("Seed must be a positive integer")
-            return v
-
-    class ImageGenerationParams(BaseModel):
-        """Pydantic model for image generation parameters validation."""
-        prompt: str = Field(..., min_length=1, max_length=500)
-        negative_prompt: Optional[str] = Field(default=None, max_length=500)
-        num_inference_steps: int = Field(default=30, ge=1, le=100)
-        guidance_scale: float = Field(default=7.5, ge=1.0, le=20.0)
-        
-        @validator('prompt')
-        def validate_prompt(cls, v):
-            if not v.strip():
-                raise ValueError("Prompt cannot be empty or just whitespace")
-            return v.strip()
+        @property
+        def headers(self) -> Dict[str, str]:
+            return {"Authorization": f"Bearer {self.REPLICATE_API_TOKEN}", "Content-Type": "application/json", "Prefer": "wait=30"}
 
     def __init__(self):
-        """
-        Initialize the Pipe class with default values and environment variables.
-        """
-        self.type = "manifold"
-        self.id = "FLUX_1_1_PRO_ULTRA"
-        self.name = "FLUX.1.1-pro-ultra: "
+        self.type, self.id, self.name = "manifold", "FLUX_1_1_PRO_ULTRA", "FLUX.1.1-pro-ultra"
         self.valves = self.Valves(
             REPLICATE_API_TOKEN=os.getenv("REPLICATE_API_TOKEN", ""),
-            REPLICATE_API_BASE_URL=os.getenv(
-                "REPLICATE_API_BASE_URL",
-                "https://api.replicate.com/v1",
-            ),
             FLUX_RAW_MODE=os.getenv("FLUX_RAW_MODE", "false").lower() == "true",
-            FLUX_SAFETY_TOLERANCE=cast(SafetyToleranceType, int(os.getenv("FLUX_SAFETY_TOLERANCE", "1"))),
+            FLUX_SAFETY_TOLERANCE=cast(SafetyToleranceType, int(os.getenv("FLUX_SAFETY_TOLERANCE", "2"))),
             FLUX_SEED=int(os.getenv("FLUX_SEED")) if os.getenv("FLUX_SEED") else None,
             FLUX_ASPECT_RATIO=cast(AspectRatioType, os.getenv("FLUX_ASPECT_RATIO", "1:1")),
-            FLUX_OUTPUT_FORMAT=cast(OutputFormatType, os.getenv("FLUX_OUTPUT_FORMAT", "jpg")),
+            FLUX_OUTPUT_FORMAT=cast(OutputFormatType, os.getenv("FLUX_OUTPUT_FORMAT", "jpg"))
         )
-
-    def get_img_extension(self, img_data: str) -> Optional[str]:
-        """
-        Get the image extension based on the base64-encoded data.
-
-        Args:
-            img_data: Base64 encoded image data
-
-        Returns:
-            Optional[str]: Image extension if recognized ('jpeg' or 'png'), None otherwise
-
-        Raises:
-            ValueError: If the image data is invalid or corrupted
-        """
-        try:
-            if not img_data:
-                raise ValueError("Empty image data provided")
-                
-            if img_data.startswith("/9j/"):
-                return "jpeg"
-            elif img_data.startswith("iVBOR"):
-                return "png"
-            return None
-        except Exception as e:
-            logger.error(f"Error determining image extension: {str(e)}")
-            raise ValueError(f"Invalid image data: {str(e)}")
-
-    def make_api_request(self, method: str, url: str, **kwargs) -> Dict[str, Any]:
-        """
-        Make an API request with retry logic and error handling.
-
-        Args:
-            method: HTTP method to use
-            url: API endpoint URL
-            **kwargs: Additional arguments to pass to requests
-
-        Returns:
-            Dict[str, Any]: API response data
-
-        Raises:
-            RequestException: If the API request fails after all retries
-        """
-        for attempt in range(self.MAX_RETRIES):
-            try:
-                response = requests.request(
-                    method,
-                    url,
-                    timeout=(self.TIMEOUT_CONNECT, self.TIMEOUT_READ),
-                    **kwargs
-                )
-                response.raise_for_status()
-                return response.json()
-            except Timeout:
-                logger.warning(f"Request timeout (attempt {attempt + 1}/{self.MAX_RETRIES})")
-                if attempt == self.MAX_RETRIES - 1:
-                    raise
-            except ConnectionError as e:
-                logger.error(f"Connection error: {str(e)}")
-                if attempt == self.MAX_RETRIES - 1:
-                    raise
-            except RequestException as e:
-                logger.error(f"API request failed: {str(e)}")
-                if attempt == self.MAX_RETRIES - 1:
-                    raise
-            
-            time.sleep(self.RETRY_DELAY)
-
-    def validate_image_params(self, prompt: str, **kwargs) -> Dict[str, Any]:
-        """
-        Validate image generation parameters.
-
-        Args:
-            prompt: The main prompt for image generation
-            **kwargs: Additional parameters for image generation
-
-        Returns:
-            Dict[str, Any]: Validated parameters
-
-        Raises:
-            ValidationError: If parameters are invalid
-        """
-        params = self.ImageGenerationParams(
-            prompt=prompt,
-            **kwargs
-        )
-        return params.dict(exclude_none=True)
-
-    def generate_image(self, prompt: str, **kwargs) -> Tuple[str, str]:
-        """
-        Generate an image based on the provided prompt and parameters.
-
-        Args:
-            prompt: The main prompt for image generation
-            **kwargs: Additional parameters for image generation
-
-        Returns:
-            Tuple[str, str]: A tuple containing (image_data, image_format)
-
-        Raises:
-            ValueError: If parameters are invalid
-            RequestException: If API request fails
-            TimeoutError: If request times out
-        """
-        try:
-            logger.info(f"Starting image generation with prompt: {prompt}")
-            
-            # Validate parameters
-            params = self.validate_image_params(prompt, **kwargs)
-            
-            # Make API request
-            response = self.make_api_request(
-                "POST",
-                self.PREDICTIONS_URL,
-                json=params,
-                headers={"Authorization": f"Token {self.valves.REPLICATE_API_TOKEN}"}
-            )
-            
-            # Process response
-            image_data = response.get("output")
-            if not image_data:
-                raise ValueError("No image data in API response")
-                
-            image_format = self.get_img_extension(image_data)
-            if not image_format:
-                raise ValueError("Unrecognized image format")
-            
-            logger.info("Image generation completed successfully")
-            return image_data, image_format
-            
-        except ValidationError as e:
-            logger.error(f"Parameter validation failed: {str(e)}")
-            raise ValueError(f"Invalid parameters: {str(e)}")
-        except (RequestException, TimeoutError) as e:
-            logger.error(f"API request failed: {str(e)}")
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error during image generation: {str(e)}")
-            raise
 
     def handle_image_response(self, response: requests.Response) -> str:
-        """
-        Handle image response from the API.
-
-        Args:
-            response: HTTP response containing image data
-
-        Returns:
-            str: Markdown formatted image string with base64 encoded data
-        """
-        content_type = response.headers.get("Content-Type", "")
-        img_ext = "png"
-        if "image/" in content_type:
-            img_ext = content_type.split("/")[-1]
-        image_base64 = base64.b64encode(response.content).decode("utf-8")
-        return f"![Image](data:{content_type};base64,{image_base64})\n`GeneratedImage.{img_ext}`"
-
-    def stream_response(
-        self, headers: Dict[str, str], payload: Dict[str, Any]
-    ) -> Generator[str, None, None]:
-        """Handle streaming response."""
-        yield self.non_stream_response(headers, payload)
-
-    def non_stream_response(
-        self, headers: Dict[str, str], payload: Dict[str, Any]
-    ) -> str:
-        """
-        Get a non-streaming response from the API.
-
-        Args:
-            headers: Request headers including authorization
-            payload: Request payload containing generation parameters
-
-        Returns:
-            str: Generated image in markdown format or error message
-
-        Raises:
-            RequestException: If the API request fails
-            ValueError: If the API response is invalid
-            TimeoutError: If the request times out
-        """
-        start_time = time.time()
-        retries = 0
-
-        while retries < self.MAX_RETRIES:
-            try:
-                # Create prediction
-                response = requests.post(
-                    url=self.PREDICTIONS_URL,
-                    headers=headers,
-                    json=payload,
-                    timeout=(self.TIMEOUT_CONNECT, self.TIMEOUT_READ),
-                )
-                response.raise_for_status()
-                prediction = response.json()
-
-                # Poll for completion
-                while prediction["status"] not in ["succeeded", "failed", "canceled"]:
-                    if time.time() - start_time > self.MAX_POLL_TIME:
-                        raise TimeoutError("Generation timed out")
-
-                    poll_url = f"{self.BASE_URL}/predictions/{prediction['id']}"
-                    response = requests.get(
-                        poll_url,
-                        headers={"Authorization": headers["Authorization"]},
-                        timeout=(self.TIMEOUT_CONNECT, self.TIMEOUT_READ),
-                    )
-                    response.raise_for_status()
-                    prediction = response.json()
-
-                    if prediction["status"] == "failed":
-                        error_msg = prediction.get("error", "Unknown error")
-                        return f"Error: Generation failed: {error_msg}"
-
-                    time.sleep(self.POLL_INTERVAL)
-
-                # Handle the completed prediction
-                if prediction["status"] == "succeeded":
-                    image_url = prediction["output"]
-                    img_response = requests.get(
-                        image_url,
-                        timeout=(self.TIMEOUT_CONNECT, self.TIMEOUT_READ),
-                    )
-                    img_response.raise_for_status()
-                    return self.handle_image_response(img_response)
-
-                return "Error: Image generation failed"
-
-            except Timeout:
-                if retries == self.MAX_RETRIES - 1:
-                    return "Error: Request timed out after multiple attempts"
-                retries += 1
-                time.sleep(self.RETRY_DELAY)
-
-            except RequestException as e:
-                return f"Error: Request failed: {str(e)}"
-
-            except Exception as e:
-                return f"Error: {str(e)}"
-
-        return "Error: Maximum retries exceeded"
-
-    def pipe(
-        self, body: Dict[str, Any]
-    ) -> Union[str, Generator[str, None, None], Iterator[str]]:
-        """
-        Process the pipe request.
-
-        Args:
-            body: Request body containing messages and stream flag
-
-        Returns:
-            Generated image result or error message
-        """
-        if not self.valves.REPLICATE_API_TOKEN:
-            return "Error: REPLICATE_API_TOKEN is required but not provided"
-
-        headers = {
-            "Authorization": f"Bearer {self.valves.REPLICATE_API_TOKEN}",
-            "Content-Type": "application/json",
-            "Prefer": "wait",
-        }
-
-        prompt = get_last_user_message(body["messages"])
-        if not prompt:
-            return "Error: No prompt provided"
-
-        # Build base payload
-        payload = {
-            "input": {
-                "prompt": prompt,
-                "aspect_ratio": self.valves.FLUX_ASPECT_RATIO,
-                "output_format": self.valves.FLUX_OUTPUT_FORMAT,
-                "safety_tolerance": self.valves.FLUX_SAFETY_TOLERANCE,
-                "raw": self.valves.FLUX_RAW_MODE,
-            }
-        }
-
-        # Only add seed if it's not None
-        if self.valves.FLUX_SEED is not None:
-            payload["input"]["seed"] = self.valves.FLUX_SEED
-
+        if not response.content:
+            return "Error: Empty image content"
         try:
-            if body.get("stream", False):
-                return self.stream_response(headers, payload)
-            else:
-                return self.non_stream_response(headers, payload)
+            image_base64 = base64.b64encode(response.content).decode("utf-8")
+            fmt = self.valves.FLUX_OUTPUT_FORMAT
+            return f"![Generated Image](data:image/{fmt};base64,{image_base64})\n`GeneratedImage.{fmt}`"
         except Exception as e:
             return f"Error: {str(e)}"
 
-    def pipes(self) -> List[Dict[str, str]]:
-        """
-        Get the list of available pipes.
+    def generate_image(self, prompt: str) -> str:
+        if not self.valves.REPLICATE_API_TOKEN:
+            return "Error: REPLICATE_API_TOKEN is required"
 
-        Returns:
-            List of pipe configurations
-        """
+        input_params = {
+            "prompt": prompt,
+            "output_format": self.valves.FLUX_OUTPUT_FORMAT
+        }
+        if self.valves.FLUX_SEED is not None: input_params["seed"] = self.valves.FLUX_SEED
+        if self.valves.FLUX_RAW_MODE: input_params["raw"] = True
+        if self.valves.FLUX_SAFETY_TOLERANCE != 2: input_params["safety_tolerance"] = self.valves.FLUX_SAFETY_TOLERANCE
+        if self.valves.FLUX_ASPECT_RATIO != "1:1": input_params["aspect_ratio"] = self.valves.FLUX_ASPECT_RATIO
+
+        try:
+            response = self.session.post(self.MODEL_URL, headers=self.valves.headers, json={"input": input_params})
+            response.raise_for_status()
+            prediction = response.json()
+
+            if prediction.get("status") == "succeeded" and prediction.get("output"):
+                img_response = self.session.get(prediction["output"])
+                img_response.raise_for_status()
+                return self.handle_image_response(img_response)
+            
+            prediction_id = prediction.get("id")
+            if not prediction_id:
+                return "Error: Invalid prediction response"
+
+            while True:
+                prediction = self.session.get(f"{self.BASE_URL}/predictions/{prediction_id}", headers=self.valves.headers).json()
+                if prediction["status"] == "succeeded":
+                    img_response = self.session.get(prediction["output"])
+                    img_response.raise_for_status()
+                    return self.handle_image_response(img_response)
+                if prediction["status"] in ["failed", "canceled"]:
+                    return f"Error: Generation {prediction['status']} - {prediction.get('error', 'Unknown error')}"
+                if prediction["status"] != "processing":
+                    return f"Error: Unexpected status {prediction['status']}"
+
+        except requests.exceptions.HTTPError as e:
+            return f"Error 422: {e.response.json().get('detail', str(e))}" if e.response.status_code == 422 else f"HTTP Error: {str(e)}"
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+    def pipe(self, body: Dict) -> Union[str, Generator[str, None, None], Iterator[str]]:
+        return self.generate_image(get_last_user_message(body["messages"]) or "Error: No prompt provided")
+
+    def pipes(self) -> list:
         return [{"id": "flux_1_1_pro_ultra", "name": "Flux 1.1 Pro Ultra"}]
-
-
-def validate_env_int(value: str, default: int, min_val: int, max_val: int) -> int:
-    """
-    Validate and convert environment variable to integer within specified range.
-
-    Args:
-        value: String value to validate
-        default: Default value if conversion fails
-        min_val: Minimum allowed value
-        max_val: Maximum allowed value
-
-    Returns:
-        int: Validated integer value
-    """
-    try:
-        val = int(value)
-        return max(min_val, min(val, max_val))
-    except (TypeError, ValueError):
-        return default
