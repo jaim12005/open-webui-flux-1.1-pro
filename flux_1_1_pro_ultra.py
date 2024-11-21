@@ -3,7 +3,7 @@ title: FLUX.1.1 Pro Ultra Manifold Function for Black Forest Lab Image Generatio
 author: Balaxxe, credit to mobilestack and bgeneto
 author_url: https://github.com/jaim12005/open-webui-flux-1.1-pro-ultra
 funding_url: https://github.com/open-webui
-version: 1.9
+version: 2.0
 license: MIT
 requirements: pydantic, requests
 environment_variables: REPLICATE_API_TOKEN
