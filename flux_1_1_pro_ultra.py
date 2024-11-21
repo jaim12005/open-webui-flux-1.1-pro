@@ -65,17 +65,24 @@ class Pipe:
         if not self.valves.REPLICATE_API_TOKEN:
             return "Error: REPLICATE_API_TOKEN is required"
 
-        input_params = {
-            "prompt": prompt,
-            "output_format": self.valves.FLUX_OUTPUT_FORMAT
-        }
-        if self.valves.FLUX_SEED is not None: input_params["seed"] = self.valves.FLUX_SEED
-        if self.valves.FLUX_RAW_MODE: input_params["raw"] = True
-        if self.valves.FLUX_SAFETY_TOLERANCE != 2: input_params["safety_tolerance"] = self.valves.FLUX_SAFETY_TOLERANCE
-        if self.valves.FLUX_ASPECT_RATIO != "1:1": input_params["aspect_ratio"] = self.valves.FLUX_ASPECT_RATIO
-
         try:
-            response = self.session.post(self.MODEL_URL, headers=self.valves.headers, json={"input": input_params})
+            input_params = {"prompt": prompt}
+            if self.valves.FLUX_RAW_MODE:
+                input_params["raw_mode"] = True
+            if self.valves.FLUX_SAFETY_TOLERANCE != 2:
+                input_params["safety_tolerance"] = self.valves.FLUX_SAFETY_TOLERANCE
+            if self.valves.FLUX_SEED is not None:
+                input_params["seed"] = self.valves.FLUX_SEED
+            if self.valves.FLUX_ASPECT_RATIO != "1:1":
+                input_params["aspect_ratio"] = self.valves.FLUX_ASPECT_RATIO
+            if self.valves.FLUX_OUTPUT_FORMAT != "jpg":
+                input_params["output_format"] = self.valves.FLUX_OUTPUT_FORMAT
+            
+            response = self.session.post(
+                self.MODEL_URL,
+                headers=self.valves.headers,
+                json={"input": input_params}
+            )
             response.raise_for_status()
             prediction = response.json()
 
@@ -86,14 +93,25 @@ class Pipe:
             
             prediction_id = prediction.get("id")
             if not prediction_id:
+                print(f"Debug - Prediction Response: {prediction}")
                 return "Error: Invalid prediction response"
 
             while True:
-                prediction = self.session.get(f"{self.BASE_URL}/predictions/{prediction_id}", headers=self.valves.headers).json()
+                prediction = self.session.get(
+                    f"{self.BASE_URL}/predictions/{prediction_id}",
+                    headers=self.valves.headers
+                ).json()
+                
                 if prediction["status"] == "succeeded":
-                    img_response = self.session.get(prediction["output"])
+                    img_response = self.session.get(prediction["output"], stream=True)
                     img_response.raise_for_status()
-                    return self.handle_image_response(img_response)
+                    content = b''.join(chunk for chunk in img_response.iter_content(chunk_size=8192))
+                    complete_response = requests.Response()
+                    complete_response._content = content
+                    complete_response.status_code = img_response.status_code
+                    complete_response.headers = img_response.headers
+                    return self.handle_image_response(complete_response)
+                    
                 if prediction["status"] in ["failed", "canceled"]:
                     return f"Error: Generation {prediction['status']} - {prediction.get('error', 'Unknown error')}"
                 if prediction["status"] != "processing":
