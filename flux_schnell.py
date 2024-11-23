@@ -3,7 +3,7 @@ title: FLUX Schnell Manifold Function for Black Forest Lab Image Generation Mode
 author: Balaxxe, credit to mobilestack and bgeneto
 author_url: https://github.com/jaim12005/open-webui-flux-1.1-pro-ultra
 funding_url: https://github.com/open-webui
-version: 1.1
+version: 1.2
 license: MIT
 requirements: pydantic>=2.0.0, aiohttp>=3.8.1
 environment_variables: 
@@ -125,6 +125,61 @@ class Pipe:
         except Exception as e:
             raise Exception(f"Failed to process image: {str(e)}")
 
+    async def _wait_for_completion(self, prediction_url: str, __event_emitter__=None) -> Dict:
+        headers = {
+            "Authorization": f"Token {self.valves.REPLICATE_API_TOKEN}",
+            "Accept": "application/json",
+            "Prefer": "wait=30"  # Tell API to wait up to 30 seconds before responding
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            # Initial delay with buffer for network latency and variation
+            await asyncio.sleep(6)
+            
+            if __event_emitter__:
+                await __event_emitter__({
+                    "type": "status",
+                    "data": {"description": "Checking generation status...", "done": False}
+                })
+            
+            # Check after initial delay
+            async with session.get(prediction_url, headers=headers, timeout=35) as response:
+                response.raise_for_status()
+                result = await response.json()
+                status = result.get("status")
+                
+                if status in ["succeeded", "failed", "canceled"]:
+                    return result
+                
+                # If not complete, wait a bit longer and try again
+                if __event_emitter__:
+                    await __event_emitter__({
+                        "type": "status",
+                        "data": {"description": "Generation in progress... almost there!", "done": False}
+                    })
+                
+                await asyncio.sleep(5)  # Extended wait for final check
+                
+                async with session.get(prediction_url, headers=headers, timeout=35) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+                    status = result.get("status")
+                    
+                    if status in ["succeeded", "failed", "canceled"]:
+                        return result
+                    
+                    # One last attempt if still not complete
+                    await asyncio.sleep(5)
+                    async with session.get(prediction_url, headers=headers, timeout=35) as response:
+                        response.raise_for_status()
+                        final_result = await response.json()
+                        final_status = final_result.get("status")
+                        
+                        if final_status in ["succeeded", "failed", "canceled"]:
+                            return final_result
+                        else:
+                            raise Exception(f"Generation incomplete after {final_status} status")
+
     async def pipe(self, body: Dict, __event_emitter__=None) -> Union[str, AsyncIterator[str]]:
         """Generate images using the Flux model."""
         if not self.valves.REPLICATE_API_TOKEN:
@@ -206,111 +261,50 @@ class Pipe:
                 prediction_url = prediction["urls"]["get"]
                 headers["Prefer"] = "wait=30"  # Tell API to wait up to 30 seconds before responding
                 
-                # First poll - wait longer to reduce extra requests
-                await asyncio.sleep(8)  # Initial delay to allow generation to complete
-                
-                try:
-                    async with session.get(prediction_url, headers=headers) as response:
-                        response.raise_for_status()
-                        result = await response.json()
-                        status = result.get("status")
+                result = await self._wait_for_completion(prediction_url, __event_emitter__)
 
-                        if status == "succeeded":
-                            if __event_emitter__:
-                                await __event_emitter__({
-                                    "type": "status",
-                                    "data": {"description": "Generation completed successfully!", "done": False}
-                                })
+                if result.get("status") == "succeeded":
+                    if __event_emitter__:
+                        await __event_emitter__({
+                            "type": "status",
+                            "data": {"description": "Generation completed successfully!", "done": False}
+                        })
 
-                            output = result.get("output", [])
-                            if isinstance(output, list):
-                                output = output[0] if output else None
-                            if not output:
-                                if __event_emitter__:
-                                    await __event_emitter__({
-                                        "type": "status",
-                                        "data": {"description": "Error: No output generated", "done": True}
-                                    })
-                                return "Error: No output generated"
-
-                            if __event_emitter__:
-                                await __event_emitter__({
-                                    "type": "status",
-                                    "data": {"description": "Processing generated image...", "done": False}
-                                })
-
-                            final_result = await self._process_image(output, session)
-
-                            if __event_emitter__:
-                                await __event_emitter__({
-                                    "type": "status",
-                                    "data": {"description": "Generation complete!", "done": True}
-                                })
-
-                            return final_result
-
-                        elif status in ["failed", "canceled"]:
-                            error = result.get("error", "Unknown error")
-                            raise Exception(f"Generation {status}: {error}")
-                        
-                        # If not complete, do one final check after a delay
+                    outputs = result.get("output", [])
+                    if not outputs:
                         if __event_emitter__:
                             await __event_emitter__({
                                 "type": "status",
-                                "data": {"description": "Generation in progress... almost there!", "done": False}
+                                "data": {"description": "Error: No output generated", "done": True}
                             })
-                        
-                        await asyncio.sleep(8)  # Wait before final check
-                        
-                        async with session.get(prediction_url, headers=headers) as final_response:
-                            final_response.raise_for_status()
-                            final_result = await final_response.json()
-                            final_status = final_result.get("status")
+                        return "Error: No output generated"
 
-                            if final_status == "succeeded":
-                                if __event_emitter__:
-                                    await __event_emitter__({
-                                        "type": "status",
-                                        "data": {"description": "Generation completed successfully!", "done": False}
-                                    })
+                    if __event_emitter__:
+                        await __event_emitter__({
+                            "type": "status",
+                            "data": {"description": "Processing generated images...", "done": False}
+                        })
 
-                                output = final_result.get("output", [])
-                                if isinstance(output, list):
-                                    output = output[0] if output else None
-                                if not output:
-                                    if __event_emitter__:
-                                        await __event_emitter__({
-                                            "type": "status",
-                                            "data": {"description": "Error: No output generated", "done": True}
-                                        })
-                                    return "Error: No output generated"
+                    # Process all images and combine them
+                    processed_images = []
+                    for output in outputs:
+                        processed_image = await self._process_image(output, session)
+                        processed_images.append(processed_image)
 
-                                if __event_emitter__:
-                                    await __event_emitter__({
-                                        "type": "status",
-                                        "data": {"description": "Processing generated image...", "done": False}
-                                    })
+                    if __event_emitter__:
+                        await __event_emitter__({
+                            "type": "status",
+                            "data": {"description": "Generation complete!", "done": True}
+                        })
 
-                                final_image = await self._process_image(output, session)
+                    # Join all images with newlines
+                    return "\n".join(processed_images)
 
-                                if __event_emitter__:
-                                    await __event_emitter__({
-                                        "type": "status",
-                                        "data": {"description": "Generation complete!", "done": True}
-                                    })
-
-                                return final_image
-
-                            elif final_status in ["failed", "canceled"]:
-                                error = final_result.get("error", "Unknown error")
-                                raise Exception(f"Generation {final_status}: {error}")
-                            else:
-                                raise Exception("Generation is taking longer than expected")
-
-                except asyncio.TimeoutError:
-                    raise Exception("Generation timed out")
-                except Exception as e:
-                    raise Exception(f"Error during generation: {str(e)}")
+                elif result.get("status") in ["failed", "canceled"]:
+                    error = result.get("error", "Unknown error")
+                    raise Exception(f"Generation {result.get('status')}: {error}")
+                else:
+                    raise Exception("Generation is taking longer than expected")
 
         except Exception as e:
             if __event_emitter__:
