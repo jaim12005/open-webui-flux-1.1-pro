@@ -3,7 +3,7 @@ title: FLUX Schnell Manifold Function for Black Forest Lab Image Generation Mode
 author: Balaxxe, credit to mobilestack and bgeneto
 author_url: https://github.com/jaim12005/open-webui-flux-1.1-pro-ultra
 funding_url: https://github.com/open-webui
-version: 1.2
+version: 1.3
 license: MIT
 requirements: pydantic>=2.0.0, aiohttp>=3.8.1
 environment_variables: 
@@ -24,19 +24,20 @@ NOTE: Due to the asynchronous nature of the Replicate API, each image generation
 2. Follow-up request(s) to check completion status
 This is normal behavior and required by the API design. You will typically see only 2 requests after the first generation.
 
-NOTE: If you first image is a PNG file - your thread will appear blank on the left hand side. Overall PNG files slow down the 
-interface for some reason. Generate and save your images, then delete the thread.
-
-NOTE: "Fluidly stream large external response chunks" must be set to OFF in the interface.
+NOTE: Your thread will appear blank on the left hand side. Also PNG files slow down the interface 
+for some reason. Generate and save your images, then delete the thread.
 """
 
-from typing import Dict, AsyncIterator, Optional, Literal, cast, Union
+from typing import Dict, AsyncIterator, Optional, Literal, cast, Union, List
 from pydantic import BaseModel, Field
 import os
 import base64
 import aiohttp
 import asyncio
 from datetime import datetime
+import json
+import uuid
+import time
 
 AspectRatioType = Literal["1:1", "16:9", "21:9", "3:2", "2:3", "4:5", "5:4", "3:4", "4:3", "9:16", "9:21"]
 OutputFormatType = Literal["webp", "jpg", "png"]
@@ -44,272 +45,233 @@ MegapixelsType = Literal["1", "0.25"]
 
 class Pipe:
     class Valves(BaseModel):
-        REPLICATE_API_TOKEN: str = Field(
-            default="",
-            description="API token for Replicate.com"
-        )
-        FLUX_SEED: Optional[int] = Field(
-            default=None,
-            description="Seed for reproducible generations"
-        )
-        FLUX_ASPECT_RATIO: AspectRatioType = Field(
-            default="1:1",
-            description="Aspect ratio of generated images"
-        )
-        FLUX_OUTPUT_FORMAT: OutputFormatType = Field(
-            default="webp",
-            description="Output format for generated images"
-        )
-        FLUX_GO_FAST: bool = Field(
-            default=True,
-            description="Enable fast mode for quicker generations"
-        )
-        FLUX_MEGAPIXELS: MegapixelsType = Field(
-            default="1",
-            description="Resolution in megapixels"
-        )
-        FLUX_NUM_OUTPUTS: int = Field(
-            default=1,
-            ge=1,
-            le=4,
-            description="Number of images to generate (1-4)"
-        )
-        FLUX_OUTPUT_QUALITY: int = Field(
-            default=80,
-            ge=0,
-            le=100,
-            description="Output image quality (0-100)"
-        )
-        FLUX_NUM_INFERENCE_STEPS: int = Field(
-            default=4,
-            ge=1,
-            le=4,
-            description="Number of inference steps (1-4)"
-        )
-        FLUX_DISABLE_SAFETY_CHECKER: bool = Field(
-            default=False,
-            description="Disable safety checker for image generation"
-        )
+        REPLICATE_API_TOKEN: str = Field(default="", description="API token for Replicate.com")
+        FLUX_SEED: Optional[int] = Field(default=None, description="Seed for reproducible generations")
+        FLUX_ASPECT_RATIO: AspectRatioType = Field(default="1:1", description="Aspect ratio")
+        FLUX_OUTPUT_FORMAT: OutputFormatType = Field(default="webp", description="Output format")
+        FLUX_GO_FAST: bool = Field(default=True, description="Enable fast mode")
+        FLUX_NUM_OUTPUTS: int = Field(default=1, ge=1, le=4, description="Number of images (1-4)")
+        FLUX_OUTPUT_QUALITY: int = Field(default=80, ge=0, le=100, description="Output quality (0-100)")
 
     def __init__(self):
         self.type = "pipe"
         self.id = "flux_schnell"
         self.name = "Flux Schnell"
         self.MODEL_URL = "https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions"
-        self.valves = self.Valves(
-            REPLICATE_API_TOKEN=os.getenv("REPLICATE_API_TOKEN", ""),
-            FLUX_SEED=int(os.getenv("FLUX_SEED")) if os.getenv("FLUX_SEED") else None,
-            FLUX_ASPECT_RATIO=cast(AspectRatioType, os.getenv("FLUX_ASPECT_RATIO", "1:1")),
-            FLUX_OUTPUT_FORMAT=cast(OutputFormatType, os.getenv("FLUX_OUTPUT_FORMAT", "webp")),
-            FLUX_GO_FAST=bool(os.getenv("FLUX_GO_FAST", True)),
-            FLUX_MEGAPIXELS=cast(MegapixelsType, os.getenv("FLUX_MEGAPIXELS", "1")),
-            FLUX_NUM_OUTPUTS=int(os.getenv("FLUX_NUM_OUTPUTS", "1")),
-            FLUX_OUTPUT_QUALITY=int(os.getenv("FLUX_OUTPUT_QUALITY", "80")),
-            FLUX_NUM_INFERENCE_STEPS=int(os.getenv("FLUX_NUM_INFERENCE_STEPS", "4")),
-            FLUX_DISABLE_SAFETY_CHECKER=bool(os.getenv("FLUX_DISABLE_SAFETY_CHECKER", False))
-        )
+        self.valves = self.Valves(**{
+            k: v for k, v in {
+                "REPLICATE_API_TOKEN": os.getenv("REPLICATE_API_TOKEN", ""),
+                "FLUX_SEED": int(os.getenv("FLUX_SEED")) if os.getenv("FLUX_SEED") else None,
+                "FLUX_ASPECT_RATIO": os.getenv("FLUX_ASPECT_RATIO", "1:1"),
+                "FLUX_OUTPUT_FORMAT": os.getenv("FLUX_OUTPUT_FORMAT", "webp"),
+                "FLUX_GO_FAST": bool(os.getenv("FLUX_GO_FAST", True)),
+                "FLUX_NUM_OUTPUTS": int(os.getenv("FLUX_NUM_OUTPUTS", "1")),
+                "FLUX_OUTPUT_QUALITY": int(os.getenv("FLUX_OUTPUT_QUALITY", "80")),
+            }.items() if v is not None
+        })
 
     def _get_status(self, message: str) -> str:
         """Format a status message with timestamp."""
         timestamp = datetime.now().strftime("%H:%M:%S")
         return f"[{timestamp}] {message}"
 
-    async def _process_image(self, url: str, session: aiohttp.ClientSession) -> str:
-        """Process and format image data."""
-        try:
-            async with session.get(url, timeout=30) as response:
-                response.raise_for_status()
-                image_data = base64.b64encode(await response.read()).decode('utf-8')
-                content_type = response.headers.get("Content-Type", f"image/{self.valves.FLUX_OUTPUT_FORMAT}")
-                return f"![Image](data:{content_type};base64,{image_data})\n`GeneratedImage.{self.valves.FLUX_OUTPUT_FORMAT}`"
-        except Exception as e:
-            raise Exception(f"Failed to process image: {str(e)}")
+    async def _process_image(self, url_or_data: str, prompt: str, params: Dict, stream: bool = True) -> Union[str, List[str]]:
+        """Process image data and return it in SSE format."""
+        if url_or_data.startswith("http"):
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url_or_data, timeout=30) as response:
+                    response.raise_for_status()
+                    image_data = base64.b64encode(await response.read()).decode("utf-8")
+                    content_type = response.headers.get("Content-Type", f"image/{self.valves.FLUX_OUTPUT_FORMAT}")
+                    image_url = f"data:{content_type};base64,{image_data}"
+        else:
+            image_url = url_or_data
+
+        if not stream:
+            return f"""<div class="generated-image">
+                <img src="{image_url}" alt="Generated Image" />
+                <details>
+                    <summary>Generation Details</summary>
+                    <ul>
+                        <li>Prompt: {prompt}</li>
+                        <li>Aspect Ratio: {params["aspect_ratio"]}</li>
+                        <li>Format: {params["output_format"]}</li>
+                        <li>Quality: {params["output_quality"]}%</li>
+                        <li>Seed: {params.get("seed", "Random")}</li>
+                    </ul>
+                </details>
+            </div>"""
+
+        # For streaming mode, return chunks
+        responses = []
+        responses.append(self._create_sse_chunk(
+            f'<div class="generated-image-container">'
+            f'<img src="{image_url}" alt="Generated Image" style="max-width: 100%; height: auto;" />'
+        ))
+        
+        metadata = (
+            f'<div class="image-metadata">'
+            f'<details><summary>Generation Details</summary>'
+            f'<p><strong>Prompt:</strong> {prompt}</p>'
+            f'<ul>'
+            f'<li>Aspect Ratio: {params["aspect_ratio"]}</li>'
+            f'<li>Format: {params["output_format"]}</li>'
+            f'<li>Quality: {params["output_quality"]}%</li>'
+            f'<li>Seed: {params.get("seed", "Random")}</li>'
+            f'</ul></details></div></div>'
+        )
+        responses.append(self._create_sse_chunk(metadata))
+        responses.append(self._create_sse_chunk({}, finish_reason="stop"))
+        responses.append("data: [DONE]\n\n")
+        
+        return responses
+
+    def _create_sse_chunk(self, content: Union[str, Dict], content_type: str = "text/html", finish_reason: Optional[str] = None) -> str:
+        """Create a Server-Sent Events chunk."""
+        chunk_data = {
+            "id": f"chatcmpl-{uuid.uuid4()}",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": "flux-schnell",
+            "choices": [{
+                "delta": {} if finish_reason else {
+                    "role": "assistant",
+                    "content": content,
+                    "content_type": content_type
+                },
+                "index": 0,
+                "finish_reason": finish_reason
+            }]
+        }
+        return f"data: {json.dumps(chunk_data)}\n\n"
 
     async def _wait_for_completion(self, prediction_url: str, __event_emitter__=None) -> Dict:
         headers = {
             "Authorization": f"Token {self.valves.REPLICATE_API_TOKEN}",
             "Accept": "application/json",
-            "Prefer": "wait=30"  # Tell API to wait up to 30 seconds before responding
+            "Prefer": "wait=30"
         }
         
         async with aiohttp.ClientSession() as session:
-            # Initial delay with buffer for network latency and variation
-            await asyncio.sleep(6)
+            await asyncio.sleep(0.5)
             
-            if __event_emitter__:
-                await __event_emitter__({
-                    "type": "status",
-                    "data": {"description": "Checking generation status...", "done": False}
-                })
-            
-            # Check after initial delay
             async with session.get(prediction_url, headers=headers, timeout=35) as response:
                 response.raise_for_status()
                 result = await response.json()
-                status = result.get("status")
-                
-                if status in ["succeeded", "failed", "canceled"]:
+                if result.get("status") in ["succeeded", "failed", "canceled"]:
                     return result
                 
-                # If not complete, wait a bit longer and try again
-                if __event_emitter__:
-                    await __event_emitter__({
-                        "type": "status",
-                        "data": {"description": "Generation in progress... almost there!", "done": False}
-                    })
+            await asyncio.sleep(0.3)
+            
+            async with session.get(prediction_url, headers=headers, timeout=35) as response:
+                response.raise_for_status()
+                result = await response.json()
+                if result.get("status") in ["succeeded", "failed", "canceled"]:
+                    return result
                 
-                await asyncio.sleep(5)  # Extended wait for final check
-                
-                async with session.get(prediction_url, headers=headers, timeout=35) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    status = result.get("status")
-                    
-                    if status in ["succeeded", "failed", "canceled"]:
-                        return result
-                    
-                    # One last attempt if still not complete
-                    await asyncio.sleep(5)
-                    async with session.get(prediction_url, headers=headers, timeout=35) as response:
-                        response.raise_for_status()
-                        final_result = await response.json()
-                        final_status = final_result.get("status")
-                        
-                        if final_status in ["succeeded", "failed", "canceled"]:
-                            return final_result
-                        else:
-                            raise Exception(f"Generation incomplete after {final_status} status")
+            await asyncio.sleep(0.3)
+            async with session.get(prediction_url, headers=headers, timeout=35) as response:
+                response.raise_for_status()
+                final_result = await response.json()
+                if final_result.get("status") in ["succeeded", "failed", "canceled"]:
+                    return final_result
+                raise Exception(f"Generation incomplete after {final_result.get('status')} status")
 
-    async def pipe(self, body: Dict, __event_emitter__=None) -> Union[str, AsyncIterator[str]]:
-        """Generate images using the Flux model."""
+    async def pipe(self, body: Dict, __event_emitter__=None) -> AsyncIterator[str]:
         if not self.valves.REPLICATE_API_TOKEN:
-            if __event_emitter__:
-                await __event_emitter__({
-                    "type": "status",
-                    "data": {"description": "Error: REPLICATE_API_TOKEN is required", "done": True}
-                })
-            return "Error: REPLICATE_API_TOKEN is required"
+            yield "Error: REPLICATE_API_TOKEN is required"
+            return
 
         try:
-            # Get prompt from messages
-            prompt = body.get("messages", [{}])[-1].get("content", "")
+            prompt = (body.get("messages", [{}])[-1].get("content", "") or "").strip()
             if not prompt:
-                if __event_emitter__:
-                    await __event_emitter__({
-                        "type": "status",
-                        "data": {"description": "Error: No prompt provided", "done": True}
-                    })
-                return "Error: No prompt provided"
+                yield "Error: No prompt provided"
+                return
 
-            if __event_emitter__:
-                await __event_emitter__({
-                    "type": "status",
-                    "data": {"description": "Starting image generation...", "done": False}
-                })
-
-            # Prepare API parameters
             input_params = {
                 "prompt": prompt,
-                "seed": self.valves.FLUX_SEED,
+                "go_fast": self.valves.FLUX_GO_FAST,
+                "num_outputs": self.valves.FLUX_NUM_OUTPUTS,
                 "aspect_ratio": self.valves.FLUX_ASPECT_RATIO,
                 "output_format": self.valves.FLUX_OUTPUT_FORMAT,
-                "go_fast": self.valves.FLUX_GO_FAST,
-                "megapixels": self.valves.FLUX_MEGAPIXELS,
-                "num_outputs": self.valves.FLUX_NUM_OUTPUTS,
-                "output_quality": self.valves.FLUX_OUTPUT_QUALITY,
-                "num_inference_steps": self.valves.FLUX_NUM_INFERENCE_STEPS,
-                "disable_safety_checker": self.valves.FLUX_DISABLE_SAFETY_CHECKER
+                "output_quality": self.valves.FLUX_OUTPUT_QUALITY
             }
-            input_params = {k: v for k, v in input_params.items() if v is not None}
+            if self.valves.FLUX_SEED is not None:
+                input_params["seed"] = self.valves.FLUX_SEED
 
-            headers = {
-                "Authorization": f"Token {self.valves.REPLICATE_API_TOKEN}",
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            }
-
-            timeout = aiohttp.ClientTimeout(total=60)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                # Start generation
-                if __event_emitter__:
-                    await __event_emitter__({
-                        "type": "status",
-                        "data": {"description": "Sending request to Replicate API...", "done": False}
-                    })
-
-                try:
-                    async with session.post(
-                        self.MODEL_URL,
-                        headers=headers,
-                        json={"input": input_params}
-                    ) as response:
-                        response.raise_for_status()
-                        prediction = await response.json()
-                except aiohttp.ClientError as e:
-                    if hasattr(e, 'status') and e.status == 422:
-                        error_detail = await response.json()
-                        raise Exception(f"API Error: {error_detail.get('detail', str(e))}")
-                    raise Exception(f"API Error: {str(e)}")
-
-                # Poll for completion
-                if __event_emitter__:
-                    await __event_emitter__({
-                        "type": "status",
-                        "data": {"description": "Request accepted, waiting for generation...", "done": False}
-                    })
-
-                prediction_url = prediction["urls"]["get"]
-                headers["Prefer"] = "wait=30"  # Tell API to wait up to 30 seconds before responding
-                
-                result = await self._wait_for_completion(prediction_url, __event_emitter__)
-
-                if result.get("status") == "succeeded":
-                    if __event_emitter__:
-                        await __event_emitter__({
-                            "type": "status",
-                            "data": {"description": "Generation completed successfully!", "done": False}
-                        })
-
-                    outputs = result.get("output", [])
-                    if not outputs:
-                        if __event_emitter__:
-                            await __event_emitter__({
-                                "type": "status",
-                                "data": {"description": "Error: No output generated", "done": True}
-                            })
-                        return "Error: No output generated"
-
-                    if __event_emitter__:
-                        await __event_emitter__({
-                            "type": "status",
-                            "data": {"description": "Processing generated images...", "done": False}
-                        })
-
-                    # Process all images and combine them
-                    processed_images = []
-                    for output in outputs:
-                        processed_image = await self._process_image(output, session)
-                        processed_images.append(processed_image)
-
-                    if __event_emitter__:
-                        await __event_emitter__({
-                            "type": "status",
-                            "data": {"description": "Generation complete!", "done": True}
-                        })
-
-                    # Join all images with newlines
-                    return "\n".join(processed_images)
-
-                elif result.get("status") in ["failed", "canceled"]:
-                    error = result.get("error", "Unknown error")
-                    raise Exception(f"Generation {result.get('status')}: {error}")
-                else:
-                    raise Exception("Generation is taking longer than expected")
-
-        except Exception as e:
             if __event_emitter__:
                 await __event_emitter__({
                     "type": "status",
-                    "data": {"description": f"Error: {str(e)}", "done": True}
+                    "data": {"description": "Starting Flux Schnell generation...", "done": False}
                 })
-            return f"Error: {str(e)}"
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.MODEL_URL,
+                    headers={
+                        "Authorization": f"Token {self.valves.REPLICATE_API_TOKEN}",
+                        "Content-Type": "application/json",
+                        "Prefer": "wait=30"
+                    },
+                    json={"input": input_params},
+                    timeout=35
+                ) as response:
+                    response.raise_for_status()
+                    prediction = await response.json()
+
+                result = await self._wait_for_completion(prediction["urls"]["get"], __event_emitter__)
+                
+                if result.get("status") != "succeeded":
+                    raise Exception(f"Generation failed: {result.get('error', 'Unknown error')}")
+
+                metrics = result.get("metrics", {})
+                logs = result.get("logs", "")
+                seed = logs.split("Using seed:")[1].split()[0].strip() if "Using seed:" in logs else None
+                image_url = result["output"][0] if isinstance(result.get("output"), list) else result.get("output")
+                
+                if not image_url:
+                    raise Exception("No valid output URL in prediction result")
+
+                if __event_emitter__:
+                    await __event_emitter__({
+                        "type": "message",
+                        "data": {
+                            "content": f"![Generated Image]({image_url})",
+                            "content_type": "text/markdown"
+                        }
+                    })
+
+                    await __event_emitter__({
+                        "type": "message",
+                        "data": {
+                            "content": f"""<details>
+<summary>Generation Details</summary>
+
+- **Prompt:** {prompt}
+- **Aspect Ratio:** {input_params["aspect_ratio"]}
+- **Format:** {input_params["output_format"]}
+- **Quality:** {input_params["output_quality"]}%
+- **Seed:** {seed or input_params.get("seed", "Random")}
+- **Generation Time:** {metrics.get("predict_time", "N/A")}s
+- **Total Time:** {metrics.get("total_time", "N/A")}s
+- **Safe Images:** {logs.split("Total safe images: ")[1].split(" ")[0] if "Total safe images:" in logs else "N/A"}
+</details>""",
+                            "content_type": "text/markdown"
+                        }
+                    })
+
+                    await __event_emitter__({
+                        "type": "status",
+                        "data": {"description": "Image generated successfully!", "done": True}
+                    })
+
+                yield ""
+
+        except Exception as e:
+            error_msg = f"Error: {str(e)}"
+            if __event_emitter__:
+                await __event_emitter__({
+                    "type": "status",
+                    "data": {"description": error_msg, "done": True}
+                })
+            yield error_msg

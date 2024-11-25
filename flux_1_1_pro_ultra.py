@@ -3,7 +3,7 @@ title: FLUX.1.1 Pro Ultra Manifold Function for Black Forest Lab Image Generatio
 author: Balaxxe, credit to mobilestack and bgeneto
 author_url: https://github.com/jaim12005/open-webui-flux-1.1-pro-ultra
 funding_url: https://github.com/open-webui
-version: 2.4
+version: 2.5
 license: MIT
 requirements: pydantic>=2.0.0, aiohttp>=3.8.0
 environment_variables: 
@@ -21,15 +21,11 @@ NOTE: Due to the asynchronous nature of the Replicate API, each image generation
 2. Follow-up request(s) to check completion status
 This is normal behavior and required by the API design. You will typically see only 2 requests after the first generation.
 
-NOTE: If you first image is a PNG file - your thread will appear blank on the left hand side. Overall PNG files slow down the 
-interface for some reason. Generate and save your images, then delete the thread.
-
-NOTE: "Fluidly stream large external response chunks" must be set to OFF in the interface.
-
-NOTE: This version supports both fluid streaming and non-streaming modes.
+NOTE: Your thread will appear blank on the left hand side. Also PNG files slow down the interface 
+for some reason. Generate and save your images, then delete the thread.
 """
 
-from typing import Dict, Generator, Iterator, Union, Optional, Literal, Tuple, List
+from typing import Dict, Generator, Iterator, Union, Optional, Literal, Tuple, List, AsyncIterator
 from pydantic import BaseModel, Field
 import os
 import base64
@@ -151,214 +147,108 @@ class Pipe:
         }
         return f"data: {json.dumps(chunk_data)}\n\n"
 
-    async def _wait_for_completion(
-        self, prediction_url: str, __event_emitter__=None
-    ) -> Dict:
+    async def _wait_for_completion(self, prediction_url: str, __event_emitter__=None) -> Dict:
         headers = {
             "Authorization": f"Token {self.valves.REPLICATE_API_TOKEN}",
             "Accept": "application/json",
-            "Prefer": "wait=30",  # Tell API to wait up to 30 seconds before responding
+            "Prefer": "wait=30"
         }
-
+        
         async with aiohttp.ClientSession() as session:
-            # Initial delay with buffer for network latency and variation
-            await asyncio.sleep(12)
-
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": "Checking generation status...",
-                            "done": False,
-                        },
-                    }
-                )
-
-            # Check after initial delay
-            async with session.get(
-                prediction_url, headers=headers, timeout=35
-            ) as response:
+            await asyncio.sleep(2)
+            
+            async with session.get(prediction_url, headers=headers, timeout=35) as response:
                 response.raise_for_status()
                 result = await response.json()
-                status = result.get("status")
-
-                if status in ["succeeded", "failed", "canceled"]:
+                if result.get("status") in ["succeeded", "failed", "canceled"]:
                     return result
+                
+            await asyncio.sleep(3)
+            
+            async with session.get(prediction_url, headers=headers, timeout=35) as response:
+                response.raise_for_status()
+                result = await response.json()
+                if result.get("status") in ["succeeded", "failed", "canceled"]:
+                    return result
+                
+            await asyncio.sleep(3)
+            async with session.get(prediction_url, headers=headers, timeout=35) as response:
+                response.raise_for_status()
+                final_result = await response.json()
+                if final_result.get("status") in ["succeeded", "failed", "canceled"]:
+                    return final_result
+                raise Exception(f"Generation incomplete after {final_result.get('status')} status")
 
-                # If not complete, wait a bit longer and try again
-                if __event_emitter__:
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": "Generation in progress... almost there!",
-                                "done": False,
-                            },
-                        }
-                    )
-
-                await asyncio.sleep(5)  # Extended wait for final check
-
-                async with session.get(
-                    prediction_url, headers=headers, timeout=35
-                ) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    status = result.get("status")
-
-                    if status in ["succeeded", "failed", "canceled"]:
-                        return result
-
-                    # One last attempt if still not complete
-                    await asyncio.sleep(5)
-                    async with session.get(
-                        prediction_url, headers=headers, timeout=35
-                    ) as response:
-                        response.raise_for_status()
-                        final_result = await response.json()
-                        final_status = final_result.get("status")
-
-                        if final_status in ["succeeded", "failed", "canceled"]:
-                            return final_result
-                        else:
-                            raise Exception(
-                                f"Generation incomplete after {final_status} status"
-                            )
-
-    async def pipe(
-        self, body: Dict, __event_emitter__=None
-    ) -> Union[str, Generator[str, None, None]]:
+    async def pipe(self, body: Dict, __event_emitter__=None) -> AsyncIterator[str]:
         if not self.valves.REPLICATE_API_TOKEN:
             yield "Error: REPLICATE_API_TOKEN is required"
             return
 
         try:
-            prompt = body.get("messages", [{}])[-1].get("content", "")
+            prompt = (body.get("messages", [{}])[-1].get("content", "") or "").strip()
             if not prompt:
                 yield "Error: No prompt provided"
                 return
 
-            # Parse image size from environment variable
-            try:
-                width, height = map(int, self.valves.FLUX_IMAGE_SIZE.split("x"))
-            except (ValueError, AttributeError):
-                width = height = 1024  # Default to 1024x1024 if parsing fails
-                
+            width, height = map(int, self.valves.FLUX_IMAGE_SIZE.split("x"))
             input_params = {
                 "prompt": prompt,
+                "raw": self.valves.FLUX_RAW_MODE,
                 "width": width,
                 "height": height,
                 "aspect_ratio": self.valves.FLUX_ASPECT_RATIO,
                 "output_format": self.valves.FLUX_OUTPUT_FORMAT,
-                "safety_tolerance": self.valves.FLUX_SAFETY_TOLERANCE,
+                "safety_tolerance": self.valves.FLUX_SAFETY_TOLERANCE
             }
-
-            if self.valves.FLUX_SEED:
+            if self.valves.FLUX_SEED is not None:
                 input_params["seed"] = int(self.valves.FLUX_SEED)
 
-            if self.valves.FLUX_RAW_MODE:
-                input_params["raw"] = True
-
             if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": "Starting image generation...",
-                            "done": False,
-                        },
-                    }
-                )
+                await __event_emitter__({
+                    "type": "status",
+                    "data": {"description": "Starting Flux 1.1 Pro Ultra generation...", "done": False}
+                })
 
             async with aiohttp.ClientSession() as session:
-                # Create prediction
-                headers = {
-                    "Authorization": f"Token {self.valves.REPLICATE_API_TOKEN}",
-                    "Content-Type": "application/json",
-                }
-                
                 async with session.post(
                     self.MODEL_URL,
-                    headers=headers,
+                    headers={
+                        "Authorization": f"Token {self.valves.REPLICATE_API_TOKEN}",
+                        "Content-Type": "application/json",
+                        "Prefer": "wait=30"
+                    },
                     json={"input": input_params},
+                    timeout=35
                 ) as response:
-                    if response.status != 201:
-                        error_msg = f"Error creating prediction: {await response.text()}"
-                        if __event_emitter__:
-                            await __event_emitter__(
-                                {
-                                    "type": "status",
-                                    "data": {"description": error_msg, "done": True},
-                                }
-                            )
-                        yield error_msg
-                        return
-
+                    response.raise_for_status()
                     prediction = await response.json()
 
-                # Get prediction result
-                prediction_result = await self._wait_for_completion(
-                    prediction["urls"]["get"], __event_emitter__
-                )
+                result = await self._wait_for_completion(prediction["urls"]["get"], __event_emitter__)
+                
+                if result.get("status") != "succeeded":
+                    raise Exception(f"Generation failed: {result.get('error', 'Unknown error')}")
 
-                if prediction_result.get("status") == "failed":
-                    error_msg = f"Generation failed: {prediction_result.get('error')}"
-                    if __event_emitter__:
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {"description": error_msg, "done": True},
-                            }
-                        )
-                    yield error_msg
-                    return
-
-                # Debug the prediction result
-                if __event_emitter__:
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": f"Debug - Result: {prediction_result}",
-                                "done": False
-                            },
-                        }
-                    )
-
-                # Get the output URL directly from the prediction result
-                image_url = prediction_result.get("output")
+                metrics = result.get("metrics", {})
+                logs = result.get("logs", "")
+                seed = logs.split("Using seed:")[1].split()[0].strip() if "Using seed:" in logs else None
+                image_url = result.get("output")
+                
                 if not image_url:
-                    error_msg = "No output URL in prediction result"
-                    if __event_emitter__:
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {"description": error_msg, "done": True},
-                            }
-                        )
-                    yield error_msg
-                    return
+                    raise Exception("No valid output URL in prediction result")
 
-                # Send the image as a message
                 if __event_emitter__:
-                    # First send the image
-                    await __event_emitter__(
-                        {
-                            "type": "message",
-                            "data": {
-                                "content": f"![Generated Image]({image_url})",
-                                "content_type": "text/markdown"
-                            },
+                    await __event_emitter__({
+                        "type": "message",
+                        "data": {
+                            "content": f"![Generated Image]({image_url})",
+                            "content_type": "text/markdown"
                         }
-                    )
-                    
-                    # Then send the metadata
-                    await __event_emitter__(
-                        {
-                            "type": "message",
-                            "data": {
-                                "content": f"""<details>
+                    })
+
+                    await __event_emitter__({
+                        "type": "message",
+                        "data": {
+                            "content": f"""<details>
 <summary>Generation Details</summary>
 
 - **Prompt:** {prompt}
@@ -366,33 +256,26 @@ class Pipe:
 - **Aspect Ratio:** {input_params["aspect_ratio"]}
 - **Format:** {input_params["output_format"]}
 - **Safety Level:** {input_params["safety_tolerance"]}
-- **Seed:** {input_params.get("seed", "Random")}
+- **Seed:** {seed or input_params.get("seed", "Random")}
+- **Generation Time:** {metrics.get("predict_time", "N/A")}s
+- **Total Time:** {metrics.get("total_time", "N/A")}s
 </details>""",
-                                "content_type": "text/markdown"
-                            },
+                            "content_type": "text/markdown"
                         }
-                    )
+                    })
 
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": "Image generated successfully!",
-                                "done": True,
-                            },
-                        }
-                    )
+                    await __event_emitter__({
+                        "type": "status",
+                        "data": {"description": "Image generated successfully!", "done": True}
+                    })
 
-                # Return empty string since we've emitted the message
                 yield ""
 
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {"description": error_msg, "done": True},
-                    }
-                )
+                await __event_emitter__({
+                    "type": "status",
+                    "data": {"description": error_msg, "done": True}
+                })
             yield error_msg
