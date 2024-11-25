@@ -88,109 +88,68 @@ class Pipe:
         )
 
     async def _process_image(self, url_or_data: str, prompt: str, params: Dict, stream: bool = True) -> Union[str, List[str]]:
-        """Process image data and return it in SSE format.
-        
-        Args:
-            url_or_data (str): Either a URL to an image or base64 encoded image data
-            prompt (str): The original prompt used to generate the image
-            params (Dict): Generation parameters used
-            stream (bool): Whether to stream the response in chunks
-            
-        Returns:
-            Union[str, List[str]]: SSE formatted response(s)
-        """
+        """Process image data and return it in SSE format."""
+        # Fetch image data if URL provided
         if url_or_data.startswith("http"):
             async with aiohttp.ClientSession() as session:
                 async with session.get(url_or_data, timeout=30) as response:
                     response.raise_for_status()
                     image_data = base64.b64encode(await response.read()).decode("utf-8")
-                    content_type = response.headers.get(
-                        "Content-Type", f"image/{self.valves.FLUX_OUTPUT_FORMAT}"
-                    )
+                    content_type = response.headers.get("Content-Type", f"image/{self.valves.FLUX_OUTPUT_FORMAT}")
                     image_url = f"data:{content_type};base64,{image_data}"
         else:
             image_url = url_or_data
 
-        # Split the response into smaller chunks for fluid streaming
+        # Build response chunks
         responses = []
         
-        # First chunk: Image container opening and image
-        image_chunk = f'''
-<div class="generated-image-container">
-    <img src="{image_url}" alt="Generated Image" style="max-width: 100%; height: auto; border-radius: 8px; margin-bottom: 8px;" />'''
+        # Image container chunk
+        responses.append(self._create_sse_chunk(
+            f'<div class="generated-image-container">'
+            f'<img src="{image_url}" alt="Generated Image" style="max-width: 100%; height: auto; border-radius: 8px; margin-bottom: 8px;" />'
+        ))
         
-        chunk_data = {
-            "id": "chatcmpl-" + str(uuid.uuid4()),
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": "flux-1.1-pro-ultra",
-            "choices": [{
-                "delta": {
-                    "role": "assistant",
-                    "content": image_chunk,
-                    "content_type": "text/html"
-                },
-                "index": 0,
-                "finish_reason": None
-            }]
-        }
-        responses.append(f"data: {json.dumps(chunk_data)}\n\n")
+        # Metadata chunk
+        metadata = (
+            f'<div class="image-metadata" style="font-size: 0.9em; color: var(--text-gray-600); dark:color: var(--text-gray-400);">'
+            f'<details><summary style="cursor: pointer; user-select: none;">Generation Details</summary>'
+            f'<div style="padding: 8px; margin-top: 4px; background: var(--bg-gray-50); dark:background: var(--bg-gray-800); border-radius: 6px;">'
+            f'<p><strong>Prompt:</strong> {prompt}</p>'
+            f'<p><strong>Parameters:</strong></p>'
+            f'<ul style="list-style-type: none; padding-left: 12px;">'
+            f'<li>• Size: {params.get("width", "1024")}x{params.get("height", "1024")}</li>'
+            f'<li>• Aspect Ratio: {params.get("aspect_ratio", self.valves.FLUX_ASPECT_RATIO)}</li>'
+            f'<li>• Format: {params.get("output_format", self.valves.FLUX_OUTPUT_FORMAT)}</li>'
+            f'<li>• Safety Level: {params.get("safety_tolerance", self.valves.FLUX_SAFETY_TOLERANCE)}</li>'
+            f'<li>• Seed: {params.get("seed", "Random")}</li>'
+            f'</ul></div></details></div></div>'
+        )
+        responses.append(self._create_sse_chunk(metadata))
         
-        # Second chunk: Metadata section
-        metadata_chunk = f'''
-    <div class="image-metadata" style="font-size: 0.9em; color: var(--text-gray-600); dark:color: var(--text-gray-400);">
-        <details>
-            <summary style="cursor: pointer; user-select: none;">Generation Details</summary>
-            <div style="padding: 8px; margin-top: 4px; background: var(--bg-gray-50); dark:background: var(--bg-gray-800); border-radius: 6px;">
-                <p><strong>Prompt:</strong> {prompt}</p>
-                <p><strong>Parameters:</strong></p>
-                <ul style="list-style-type: none; padding-left: 12px;">
-                    <li>• Size: {params.get("width", "1024")}x{params.get("height", "1024")}</li>
-                    <li>• Aspect Ratio: {params.get("aspect_ratio", self.valves.FLUX_ASPECT_RATIO)}</li>
-                    <li>• Format: {params.get("output_format", self.valves.FLUX_OUTPUT_FORMAT)}</li>
-                    <li>• Safety Level: {params.get("safety_tolerance", self.valves.FLUX_SAFETY_TOLERANCE)}</li>
-                    <li>• Seed: {params.get("seed", "Random")}</li>
-                </ul>
-            </div>
-        </details>
-    </div>
-</div>'''
-        
-        chunk_data = {
-            "id": "chatcmpl-" + str(uuid.uuid4()),
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": "flux-1.1-pro-ultra",
-            "choices": [{
-                "delta": {
-                    "role": "assistant",
-                    "content": metadata_chunk,
-                    "content_type": "text/html"
-                },
-                "index": 0,
-                "finish_reason": None
-            }]
-        }
-        responses.append(f"data: {json.dumps(chunk_data)}\n\n")
-        
-        # Final chunk: Finish marker
-        finish_data = {
-            "id": "chatcmpl-" + str(uuid.uuid4()),
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": "flux-1.1-pro-ultra",
-            "choices": [{
-                "delta": {},
-                "index": 0,
-                "finish_reason": "stop"
-            }]
-        }
-        responses.append(f"data: {json.dumps(finish_data)}\n\n")
+        # Finish chunks
+        responses.append(self._create_sse_chunk({}, finish_reason="stop"))
         responses.append("data: [DONE]\n\n")
         
-        # If fluid streaming is enabled, return list of responses
-        # Otherwise concatenate them into a single response
         return responses if stream else "".join(responses)
+
+    def _create_sse_chunk(self, content: Union[str, Dict], content_type: str = "text/html", finish_reason: Optional[str] = None) -> str:
+        """Create a Server-Sent Events chunk."""
+        chunk_data = {
+            "id": f"chatcmpl-{uuid.uuid4()}",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": "flux-1.1-pro-ultra",
+            "choices": [{
+                "delta": {} if finish_reason else {
+                    "role": "assistant",
+                    "content": content,
+                    "content_type": content_type
+                },
+                "index": 0,
+                "finish_reason": finish_reason
+            }]
+        }
+        return f"data: {json.dumps(chunk_data)}\n\n"
 
     async def _wait_for_completion(
         self, prediction_url: str, __event_emitter__=None
