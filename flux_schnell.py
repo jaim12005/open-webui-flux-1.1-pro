@@ -3,7 +3,7 @@ title: FLUX Schnell Manifold Function for Black Forest Lab Image Generation Mode
 author: Balaxxe, credit to mobilestack and bgeneto
 author_url: https://github.com/jaim12005/open-webui-flux-1.1-pro-ultra
 funding_url: https://github.com/open-webui
-version: 1.4
+version: 1.5
 license: MIT
 requirements: pydantic>=2.0.0, aiohttp>=3.8.1
 environment_variables: 
@@ -270,7 +270,7 @@ class Pipe:
 - **Seed:** {seed or input_params.get("seed", "Random")}
 - **Generation Time:** {metrics.get("predict_time", "N/A")}s
 - **Total Time:** {metrics.get("total_time", "N/A")}s
-- **Safe Images:** {logs.split("Total safe images: ")[1].split(" ")[0] if "Total safe images:" in logs else "N/A"}
+- **Safe Images:** {logs.split("Total safe images: ")[1].split(" ")[0] if "Total safe images:" in logs and not self.valves.FLUX_DISABLE_SAFETY else "Disabled"}
 </details>""",
                             "content_type": "text/markdown"
                         }
