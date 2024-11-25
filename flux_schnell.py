@@ -3,20 +3,18 @@ title: FLUX Schnell Manifold Function for Black Forest Lab Image Generation Mode
 author: Balaxxe, credit to mobilestack and bgeneto
 author_url: https://github.com/jaim12005/open-webui-flux-1.1-pro-ultra
 funding_url: https://github.com/open-webui
-version: 1.3
+version: 1.4
 license: MIT
 requirements: pydantic>=2.0.0, aiohttp>=3.8.1
 environment_variables: 
     - REPLICATE_API_TOKEN (required)
+    - FLUX_GO_FAST (optional, default: true)
+    - FLUX_DISABLE_SAFETY (optional, default: false)
     - FLUX_SEED (optional)
     - FLUX_ASPECT_RATIO (optional, default: "1:1")
     - FLUX_OUTPUT_FORMAT (optional, default: "webp")
-    - FLUX_GO_FAST (optional, default: true)
-    - FLUX_MEGAPIXELS (optional, default: "1")
-    - FLUX_NUM_OUTPUTS (optional, default: 1)
     - FLUX_OUTPUT_QUALITY (optional, default: 80)
-    - FLUX_NUM_INFERENCE_STEPS (optional, default: 4)
-    - FLUX_DISABLE_SAFETY_CHECKER (optional, default: false)
+    - FLUX_NUM_OUTPUTS (optional, default: 1)
 supported providers: replicate.com
 
 NOTE: Due to the asynchronous nature of the Replicate API, each image generation will make 2-3 (rare occasion 4) API requests:
@@ -45,13 +43,30 @@ MegapixelsType = Literal["1", "0.25"]
 
 class Pipe:
     class Valves(BaseModel):
-        REPLICATE_API_TOKEN: str = Field(default="", description="API token for Replicate.com")
-        FLUX_SEED: Optional[int] = Field(default=None, description="Seed for reproducible generations")
-        FLUX_ASPECT_RATIO: AspectRatioType = Field(default="1:1", description="Aspect ratio")
-        FLUX_OUTPUT_FORMAT: OutputFormatType = Field(default="webp", description="Output format")
-        FLUX_GO_FAST: bool = Field(default=True, description="Enable fast mode")
-        FLUX_NUM_OUTPUTS: int = Field(default=1, ge=1, le=4, description="Number of images (1-4)")
-        FLUX_OUTPUT_QUALITY: int = Field(default=80, ge=0, le=100, description="Output quality (0-100)")
+        REPLICATE_API_TOKEN: str = Field(
+            default="", description="Your Replicate API token"
+        )
+        FLUX_GO_FAST: bool = Field(
+            default=True, description="Enable fast mode"
+        )
+        FLUX_DISABLE_SAFETY: bool = Field(
+            default=False, description="Disable the built-in safety checker (API only)"
+        )
+        FLUX_SEED: Optional[int] = Field(
+            default=None, description="Random seed for reproducible generations"
+        )
+        FLUX_ASPECT_RATIO: AspectRatioType = Field(
+            default="1:1", description="Output image aspect ratio"
+        )
+        FLUX_OUTPUT_FORMAT: OutputFormatType = Field(
+            default="webp", description="Output image format"
+        )
+        FLUX_OUTPUT_QUALITY: int = Field(
+            default=80, description="Output image quality (1-100)"
+        )
+        FLUX_NUM_OUTPUTS: int = Field(
+            default=1, description="Number of images to generate"
+        )
 
     def __init__(self):
         self.type = "pipe"
@@ -194,7 +209,8 @@ class Pipe:
                 "num_outputs": self.valves.FLUX_NUM_OUTPUTS,
                 "aspect_ratio": self.valves.FLUX_ASPECT_RATIO,
                 "output_format": self.valves.FLUX_OUTPUT_FORMAT,
-                "output_quality": self.valves.FLUX_OUTPUT_QUALITY
+                "output_quality": self.valves.FLUX_OUTPUT_QUALITY,
+                "disable_safety_checker": self.valves.FLUX_DISABLE_SAFETY
             }
             if self.valves.FLUX_SEED is not None:
                 input_params["seed"] = self.valves.FLUX_SEED
